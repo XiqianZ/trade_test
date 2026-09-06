@@ -51,8 +51,39 @@ def download_ticker(
     df = ticker.history(start=start, end=end, interval=interval, auto_adjust=True)
     if df.empty:
         raise ValueError(f"No data returned for {symbol!r} ({start} → {end}, interval={interval})")
-    df.index = df.index.tz_localize(None) if df.index.tzinfo is not None else df.index
+    if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
     return df[["Open", "High", "Low", "Close", "Volume"]]
+
+
+
+
+def download_ticker_full_history(
+    symbol: str,
+    interval: str = "1d",
+) -> pd.DataFrame:
+    """Download the maximum available OHLCV history for a ticker.
+
+    Args:
+        symbol:   Ticker symbol, e.g. "AAPL" or "3810.T".
+        interval: Bar size — "1d", "1wk", "1mo", "1h", "5m", etc.
+
+    Returns:
+        DataFrame with columns [Open, High, Low, Close, Volume] indexed by datetime.
+    """
+    ticker = yf.Ticker(symbol)
+    df = ticker.history(period="max", interval=interval, auto_adjust=True)
+    if df.empty:
+        raise ValueError(f"No data returned for {symbol!r} (interval={interval})")
+    if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    df = df[["Open", "High", "Low", "Close", "Volume"]]
+
+    # Persist to cache so future range-based lookups can use it.
+    from data.cache import save_cache
+    save_cache(df, symbol, interval)
+
+    return df
 
 
 def download_tickers(
@@ -73,3 +104,5 @@ def download_tickers(
         except ValueError as exc:
             print(f"[downloader] warning: {exc}")
     return result
+
+

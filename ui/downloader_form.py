@@ -1,23 +1,47 @@
+import re
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
-from data import download_ticker
+from data import cached_download_ticker as download_ticker
 from data.downloader import MAX_LOOKBACK_DAYS
 
 
 _INTERVALS = ["1d", "1wk", "1mo", "1h", "30m", "15m", "5m", "1m"]
 
 
-def render_downloader_form() -> pd.DataFrame | None:
+def _parse_symbols(raw: str) -> list[str]:
+    """Parse a symbol string into a list of uppercase tickers.
+
+    Delimiters: commas and/or whitespace (any mix).
+    Each token may optionally be surrounded by double quotes.
+
+        AAPL TSLA "GOOGL"        →  ["AAPL", "TSLA", "GOOGL"]
+        AAPL, "TSLA", GOOGL      →  ["AAPL", "TSLA", "GOOGL"]
+        AAPL  TSLA,GOOGL "MSFT"  →  ["AAPL", "TSLA", "GOOGL", "MSFT"]
+    """
+    symbols = []
+    for token in re.split(r'[\s,]+', raw):
+        symbol = token.strip('"').upper()
+        if symbol:
+            symbols.append(symbol)
+    return symbols
+
+
+def render_downloader_form() -> dict[str, pd.DataFrame] | None:
     """Render the stock downloader form.
 
-    Returns the downloaded DataFrame when the user submits, otherwise None.
+    Returns a dict mapping each symbol to its DataFrame when the user submits,
+    otherwise None.
     """
     st.subheader("Download Stock Data")
 
     col1, col2 = st.columns(2)
     with col1:
-        symbol = st.text_input("Ticker symbol", value="AAPL", placeholder="e.g. AAPL, TSLA")
+        symbols_raw = st.text_input(
+            "Ticker symbols",
+            value="AAPL",
+            placeholder='e.g.  AAPL, "TSLA", GOOGL',
+        )
     with col2:
         interval = st.selectbox("Interval", options=_INTERVALS, index=0)
 
@@ -38,27 +62,42 @@ def render_downloader_form() -> pd.DataFrame | None:
         end = st.date_input("End date", value=today, min_value=min_start, max_value=today)
 
     if st.button("Download", type="primary"):
-        symbol = symbol.strip().upper()
-        if not symbol:
-            st.error("Please enter a ticker symbol.")
+        symbols = _parse_symbols(symbols_raw)
+        if not symbols:
+            st.error("Please enter at least one ticker symbol.")
             return None
         if start >= end:
             st.error("Start date must be before end date.")
             return None
-        with st.spinner(f"Downloading {symbol}…"):
-            try:
-                df = download_ticker(
-                    symbol,
-                    start=str(start),
-                    end=str(end),
-                    interval=interval,
-                )
-            except ValueError as exc:
-                st.error(str(exc))
-                return None
 
-        st.success(f"Downloaded {len(df):,} rows for **{symbol}**.")
-        st.dataframe(df, use_container_width=True)
-        return df
+        results: dict[str, pd.DataFrame] = {}
+        errors: list[str] = []
+
+        with st.spinner(f"Downloading {', '.join(symbols)}…"):
+            for symbol in symbols:
+                try:
+                    results[symbol] = download_ticker(
+                        symbol,
+                        start=str(start),
+                        end=str(end),
+                        interval=interval,
+                    )
+                except ValueError as exc:
+                    errors.append(str(exc))
+
+        for msg in errors:
+            st.error(msg)
+
+        if not results:
+            return None
+
+        # Show each symbol in its own tab.
+        tabs = st.tabs(list(results.keys()))
+        for tab, (symbol, df) in zip(tabs, results.items()):
+            with tab:
+                st.caption(f"{len(df):,} rows · {interval}")
+                st.dataframe(df, use_container_width=True)
+
+        return results
 
     return None
