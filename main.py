@@ -1,5 +1,5 @@
 import streamlit as st
-from data.cache import list_split_events
+from data import cache as data_cache
 from ui import render_downloader_form
 from ui.strategy_form import render_universe_form
 from ui.sidebar import render_sidebar
@@ -16,7 +16,10 @@ with tab_download:
 with tab_strategy:
     universe = render_universe_form()
 
-split_events = list_split_events()
+list_split_events = getattr(data_cache, "list_split_events", None)
+split_events = list_split_events() if callable(list_split_events) else []
+if not isinstance(split_events, list):
+    split_events = []
 if split_events:
     st.markdown("### Split Events")
     for event in split_events:

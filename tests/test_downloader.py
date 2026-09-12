@@ -115,5 +115,52 @@ def test_cached_download_reloads_full_history_after_split(monkeypatch, tmp_path)
     assert metadata["last_sync"] == "2024-02-15"
 
 
+def test_cached_full_history_returns_existing_cache(monkeypatch, tmp_path):
+    symbol = "TEST"
+    interval = "1d"
+    cache_dir = tmp_path / "cache"
+    cache_mod.CACHE_DIR = cache_dir
+
+    cached = pd.DataFrame(
+        {
+            "Open": [100.0],
+            "High": [110.0],
+            "Low": [95.0],
+            "Close": [105.0],
+            "Volume": [1000],
+        },
+        index=[pd.Timestamp("2024-01-01")],
+    )
+    cache_mod.save_cache(cached, symbol, interval)
+
+    calls = []
+
+    def fake_full_download(sym: str, interval: str = "1d"):
+        calls.append((sym, interval))
+        return cached
+
+    monkeypatch.setattr(cache_mod, "download_ticker_full_history", fake_full_download)
+
+    result = cache_mod.cached_download_ticker_full_history(symbol, interval=interval)
+
+    assert result.equals(cached)
+    assert calls == []
+
+
+def test_load_ticker_name_symbols_reads_json_keys(tmp_path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_mod.CACHE_DIR = cache_dir
+
+    payload = {
+        "7203.T": "Toyota",
+        "1301.T": "Kyokuyo",
+        "6758.T": "Sony",
+    }
+    (cache_dir / "ticker_names.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cache_mod.load_ticker_name_symbols() == ["1301.T", "6758.T", "7203.T"]
+
+
 if __name__ == "__main__":
     main()

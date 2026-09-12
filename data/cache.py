@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -36,6 +37,26 @@ def load_cache(symbol: str, interval: str) -> pd.DataFrame | None:
     if not path.exists():
         return None
     return pd.read_parquet(path)
+
+
+def load_ticker_name_symbols() -> list[str]:
+    """Load the symbol list from data/cache/ticker_names.json, if present."""
+    path = CACHE_DIR / "ticker_names.json"
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    if isinstance(payload, dict):
+        symbols = payload.keys()
+    elif isinstance(payload, list):
+        symbols = payload
+    else:
+        return []
+
+    return sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
 
 
 def list_cached_symbols() -> list[str]:
@@ -177,3 +198,49 @@ def cached_download_ticker(
 
     save_cache(merged, symbol, interval)
     return merged.loc[start:end]
+
+
+def cached_download_ticker_full_history(
+    symbol: str,
+    interval: str = "1d",
+    overwrite: bool = False,
+) -> pd.DataFrame:
+    """Download and cache the maximum history for one symbol.
+
+    If the Parquet cache already exists and overwrite is False, the cached
+    data is returned immediately without hitting yfinance.
+    """
+    cached = None if overwrite else load_cache(symbol, interval)
+    if cached is not None:
+        return cached
+
+    fresh = download_ticker_full_history(symbol, interval=interval)
+    save_cache(fresh, symbol, interval)
+    return fresh
+
+
+def cached_download_ticker_full_history_batch(
+    symbols: list[str] | None = None,
+    interval: str = "1d",
+    pause_seconds: float = 1.5,
+    overwrite: bool = False,
+) -> dict[str, pd.DataFrame]:
+    """Download full history for many symbols with throttling.
+
+    When symbols is None, the list is loaded from data/cache/ticker_names.json.
+    The pause between requests keeps the request rate low enough to reduce the
+    chance of yfinance throttling or temporary blocking.
+    """
+    targets = symbols if symbols is not None else load_ticker_name_symbols()
+    result: dict[str, pd.DataFrame] = {}
+
+    for index, symbol in enumerate(targets, 1):
+        result[symbol] = cached_download_ticker_full_history(
+            symbol,
+            interval=interval,
+            overwrite=overwrite,
+        )
+        if pause_seconds > 0 and index < len(targets):
+            time.sleep(pause_seconds)
+
+    return result

@@ -1,8 +1,14 @@
 import re
+import time
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
-from data import cached_download_ticker as download_ticker
+from data import (
+    cached_download_ticker as download_ticker,
+    cached_download_ticker_full_history,
+    load_ticker_name_symbols,
+)
+from data.cache import load_cache
 from data.downloader import MAX_LOOKBACK_DAYS
 
 
@@ -99,5 +105,58 @@ def render_downloader_form() -> dict[str, pd.DataFrame] | None:
                 st.dataframe(df, use_container_width=True)
 
         return results
+
+    st.divider()
+    st.caption("Bulk full-history download uses the cached ticker-name list in data/cache/ticker_names.json.")
+
+    pause_seconds = st.number_input(
+        "Pause between tickers",
+        min_value=0.0,
+        max_value=10.0,
+        value=1.5,
+        step=0.5,
+        help="Keeps the request rate low so yfinance is less likely to throttle the batch.",
+    )
+
+    if st.button("Download full history for all cached ticker names"):
+        symbols = load_ticker_name_symbols()
+        if not symbols:
+            st.error("No ticker names found in data/cache/ticker_names.json.")
+            return None
+
+        progress = st.progress(0)
+        status = st.empty()
+        downloaded = 0
+        skipped = 0
+        failed: list[str] = []
+        need_pause = False
+
+        with st.spinner(f"Downloading full history for {len(symbols)} tickers…"):
+            for index, symbol in enumerate(symbols, 1):
+                if load_cache(symbol, interval) is not None:
+                    skipped += 1
+                    status.text(f"{index}/{len(symbols)}: {symbol} already cached")
+                    progress.progress(index / len(symbols))
+                    continue
+
+                if need_pause and pause_seconds > 0:
+                    time.sleep(float(pause_seconds))
+
+                status.text(f"{index}/{len(symbols)}: {symbol}")
+                try:
+                    cached_download_ticker_full_history(symbol, interval=interval)
+                    downloaded += 1
+                except ValueError as exc:
+                    failed.append(f"{symbol}: {exc}")
+                need_pause = True
+                progress.progress(index / len(symbols))
+
+        status.text(f"Finished: cached {downloaded} tickers, skipped {skipped} cached tickers.")
+        st.success(f"Finished caching {downloaded} tickers; skipped {skipped} already cached.")
+        if failed:
+            st.warning(f"{len(failed)} tickers could not be downloaded.")
+            for message in failed:
+                st.error(message)
+        return None
 
     return None
