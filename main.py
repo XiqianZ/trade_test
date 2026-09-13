@@ -2,11 +2,8 @@ import streamlit as st
 from data import cache as data_cache
 from ui import render_downloader_form
 from ui.strategy_form import render_universe_form
-from ui.sidebar import render_sidebar
 
 st.title("Trade Test")
-
-selected_symbols = render_sidebar()
 
 tab_download, tab_strategy = st.tabs(["Download Data", "Strategy"])
 

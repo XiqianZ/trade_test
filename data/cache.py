@@ -39,6 +39,15 @@ def load_cache(symbol: str, interval: str) -> pd.DataFrame | None:
     return pd.read_parquet(path)
 
 
+def has_cache(symbol: str, interval: str) -> bool:
+    """Return True when a cache parquet exists for symbol+interval.
+
+    This avoids reading large parquet files when callers only need to know
+    whether a cache entry exists.
+    """
+    return _parquet_path(symbol, interval).exists()
+
+
 def load_ticker_name_symbols() -> list[str]:
     """Load the symbol list from data/cache/ticker_names.json, if present."""
     path = CACHE_DIR / "ticker_names.json"

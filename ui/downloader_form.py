@@ -1,5 +1,6 @@
 import re
 import time
+import threading
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
@@ -8,11 +9,118 @@ from data import (
     cached_download_ticker_full_history,
     load_ticker_name_symbols,
 )
-from data.cache import load_cache
+from data.cache import has_cache
 from data.downloader import MAX_LOOKBACK_DAYS
 
 
 _INTERVALS = ["1d", "1wk", "1mo", "1h", "30m", "15m", "5m", "1m"]
+
+
+_BULK_JOB_LOCK = threading.Lock()
+_BULK_JOB: dict | None = None
+
+
+def _start_bulk_history_job(symbols: list[str], interval: str, pause_seconds: float) -> bool:
+    """Start one background bulk-history job if none is running.
+
+    Returns False when a job is already in progress.
+    """
+    global _BULK_JOB
+    with _BULK_JOB_LOCK:
+        if _BULK_JOB is not None and _BULK_JOB["running"]:
+            return False
+        _BULK_JOB = {
+            "running": True,
+            "total": len(symbols),
+            "processed": 0,
+            "downloaded": 0,
+            "skipped": 0,
+            "failed": [],
+            "current": "",
+            "interval": interval,
+            "pause_seconds": float(pause_seconds),
+            "error": None,
+        }
+
+    worker = threading.Thread(
+        target=_run_bulk_history_job,
+        args=(list(symbols), interval, float(pause_seconds)),
+        daemon=True,
+    )
+    worker.start()
+    return True
+
+
+def _run_bulk_history_job(symbols: list[str], interval: str, pause_seconds: float) -> None:
+    """Background worker for full-history cache population."""
+    global _BULK_JOB
+    need_pause = False
+    try:
+        for index, symbol in enumerate(symbols, 1):
+            with _BULK_JOB_LOCK:
+                if _BULK_JOB is None:
+                    return
+                _BULK_JOB["current"] = symbol
+
+            if has_cache(symbol, interval):
+                with _BULK_JOB_LOCK:
+                    if _BULK_JOB is None:
+                        return
+                    _BULK_JOB["skipped"] += 1
+                    _BULK_JOB["processed"] = index
+                continue
+
+            if need_pause and pause_seconds > 0:
+                time.sleep(pause_seconds)
+
+            try:
+                cached_download_ticker_full_history(symbol, interval=interval)
+                with _BULK_JOB_LOCK:
+                    if _BULK_JOB is None:
+                        return
+                    _BULK_JOB["downloaded"] += 1
+            except ValueError as exc:
+                with _BULK_JOB_LOCK:
+                    if _BULK_JOB is None:
+                        return
+                    _BULK_JOB["failed"].append(f"{symbol}: {exc}")
+
+            need_pause = True
+            with _BULK_JOB_LOCK:
+                if _BULK_JOB is None:
+                    return
+                _BULK_JOB["processed"] = index
+    except Exception as exc:  # pragma: no cover - defensive guard for background worker
+        with _BULK_JOB_LOCK:
+            if _BULK_JOB is None:
+                return
+            _BULK_JOB["error"] = str(exc)
+    finally:
+        with _BULK_JOB_LOCK:
+            if _BULK_JOB is None:
+                return
+            _BULK_JOB["running"] = False
+            _BULK_JOB["current"] = ""
+            _BULK_JOB["processed"] = len(symbols)
+
+
+def _bulk_job_snapshot() -> dict | None:
+    """Return a shallow copy of current bulk job state."""
+    with _BULK_JOB_LOCK:
+        if _BULK_JOB is None:
+            return None
+        return {
+            **_BULK_JOB,
+            "failed": list(_BULK_JOB["failed"]),
+        }
+
+
+def _clear_finished_bulk_job() -> None:
+    """Clear finished bulk job state from memory."""
+    global _BULK_JOB
+    with _BULK_JOB_LOCK:
+        if _BULK_JOB is not None and not _BULK_JOB["running"]:
+            _BULK_JOB = None
 
 
 def _parse_symbols(raw: str) -> list[str]:
@@ -118,45 +226,46 @@ def render_downloader_form() -> dict[str, pd.DataFrame] | None:
         help="Keeps the request rate low so yfinance is less likely to throttle the batch.",
     )
 
-    if st.button("Download full history for all cached ticker names"):
+    if st.button("Download full history for all cached ticker names (background)"):
         symbols = load_ticker_name_symbols()
         if not symbols:
             st.error("No ticker names found in data/cache/ticker_names.json.")
             return None
+        started = _start_bulk_history_job(symbols, interval=interval, pause_seconds=float(pause_seconds))
+        if started:
+            st.success(f"Started background download for {len(symbols)} tickers.")
+        else:
+            st.warning("A bulk history download is already running.")
 
-        progress = st.progress(0)
-        status = st.empty()
-        downloaded = 0
-        skipped = 0
-        failed: list[str] = []
-        need_pause = False
+    job = _bulk_job_snapshot()
+    if job is not None:
+        total = int(job["total"])
+        processed = int(job["processed"])
+        downloaded = int(job["downloaded"])
+        skipped = int(job["skipped"])
+        failed = list(job["failed"])
+        current = str(job["current"])
+        progress_value = (processed / total) if total > 0 else 1.0
 
-        with st.spinner(f"Downloading full history for {len(symbols)} tickers…"):
-            for index, symbol in enumerate(symbols, 1):
-                if load_cache(symbol, interval) is not None:
-                    skipped += 1
-                    status.text(f"{index}/{len(symbols)}: {symbol} already cached")
-                    progress.progress(index / len(symbols))
-                    continue
+        st.progress(progress_value)
+        st.caption(
+            f"{processed}/{total} processed | downloaded {downloaded} | skipped {skipped} | failed {len(failed)}"
+        )
 
-                if need_pause and pause_seconds > 0:
-                    time.sleep(float(pause_seconds))
-
-                status.text(f"{index}/{len(symbols)}: {symbol}")
-                try:
-                    cached_download_ticker_full_history(symbol, interval=interval)
-                    downloaded += 1
-                except ValueError as exc:
-                    failed.append(f"{symbol}: {exc}")
-                need_pause = True
-                progress.progress(index / len(symbols))
-
-        status.text(f"Finished: cached {downloaded} tickers, skipped {skipped} cached tickers.")
-        st.success(f"Finished caching {downloaded} tickers; skipped {skipped} already cached.")
-        if failed:
-            st.warning(f"{len(failed)} tickers could not be downloaded.")
-            for message in failed:
-                st.error(message)
-        return None
+        if job["running"]:
+            if current:
+                st.info(f"Currently processing: {current}")
+            st.caption("Refresh the app to update status while the background worker runs.")
+        else:
+            st.success(f"Finished caching {downloaded} tickers; skipped {skipped} already cached.")
+            if job.get("error"):
+                st.error(f"Background worker stopped with error: {job['error']}")
+            if failed:
+                st.warning(f"{len(failed)} tickers could not be downloaded.")
+                for message in failed:
+                    st.error(message)
+            if st.button("Clear finished batch status"):
+                _clear_finished_bulk_job()
+                st.rerun()
 
     return None
