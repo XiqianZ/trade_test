@@ -48,6 +48,24 @@ def has_cache(symbol: str, interval: str) -> bool:
     return _parquet_path(symbol, interval).exists()
 
 
+def has_current_cache(symbol: str, interval: str) -> bool:
+    """Return True when cached data was successfully synchronized today."""
+    path = _parquet_path(symbol, interval)
+    if not path.exists():
+        return False
+
+    last_sync = load_sync_metadata(symbol, interval)
+    if last_sync is None:
+        return False
+
+    try:
+        sync_date = pd.Timestamp(last_sync).date()
+    except (TypeError, ValueError):
+        return False
+
+    return sync_date >= pd.Timestamp.now().date()
+
+
 def load_ticker_name_symbols() -> list[str]:
     """Load the symbol list from data/cache/ticker_names.json, if present."""
     path = CACHE_DIR / "ticker_names.json"
@@ -108,7 +126,7 @@ def save_cache(df: pd.DataFrame, symbol: str, interval: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path)
     if not df.empty:
-        save_sync_metadata(symbol, interval, df.index.max())
+        save_sync_metadata(symbol, interval, pd.Timestamp.now())
 
 
 def _split_occurred_since(symbol: str, last_sync: str | None) -> bool:

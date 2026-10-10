@@ -9,7 +9,7 @@ from data import (
     cached_download_ticker_full_history,
     load_ticker_name_symbols,
 )
-from data.cache import has_cache
+from data.cache import has_current_cache
 from data.downloader import MAX_LOOKBACK_DAYS
 
 
@@ -62,7 +62,7 @@ def _run_bulk_history_job(symbols: list[str], interval: str, pause_seconds: floa
                     return
                 _BULK_JOB["current"] = symbol
 
-            if has_cache(symbol, interval):
+            if has_current_cache(symbol, interval):
                 with _BULK_JOB_LOCK:
                     if _BULK_JOB is None:
                         return
@@ -74,7 +74,11 @@ def _run_bulk_history_job(symbols: list[str], interval: str, pause_seconds: floa
                 time.sleep(pause_seconds)
 
             try:
-                cached_download_ticker_full_history(symbol, interval=interval)
+                cached_download_ticker_full_history(
+                    symbol,
+                    interval=interval,
+                    overwrite=True,
+                )
                 with _BULK_JOB_LOCK:
                     if _BULK_JOB is None:
                         return
@@ -226,7 +230,7 @@ def render_downloader_form() -> dict[str, pd.DataFrame] | None:
         help="Keeps the request rate low so yfinance is less likely to throttle the batch.",
     )
 
-    if st.button("Download full history for all cached ticker names (background)"):
+    if st.button("Download full (background)"):
         symbols = load_ticker_name_symbols()
         if not symbols:
             st.error("No ticker names found in data/cache/ticker_names.json.")
